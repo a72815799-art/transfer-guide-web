@@ -541,6 +541,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
     if (!ID_RE.test(u.id ?? '')) e('id 형식 오류');
     if (fileId && u.id !== fileId) e(`파일 이름(${fileId})과 id 불일치`);
     const str = (v) => typeof v === 'string' && v.trim() !== '';
+    const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
     const optStr = (v, where) => { if (v !== undefined && v !== null && typeof v !== 'string') e(`${where}: 문자열 또는 null이어야 함`); };
     if (!str(u.name)) e('name 없음(문자열)');
     optStr(u.notes, 'notes');
@@ -570,7 +571,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
       if (!URL_RE.test(s.url)) e(`${where}: source.url 형식 오류`);
     };
 
-    const g = u.guide;
+    const g = isObj(u.guide) ? u.guide : null;
     if (!g) e('guide 없음');
     else {
       if (![2026, 2027].includes(g.year)) e(`guide.year 오류: ${g.year}`);
@@ -578,11 +579,11 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
       if (g.status === '2027 확정' && g.year !== 2027) e('2027 확정인데 year가 2027이 아님');
       if (g.status === '전년도 참고' && g.year !== 2026) e('전년도 참고인데 year가 2026이 아님');
       if (u.dataStatus === 'ok' && !URL_RE.test(g.url ?? '')) e('guide.url 형식 오류');
-      if (!isValidDate(g.checkedAt ?? '')) e('guide.checkedAt 날짜 오류');
+      if (typeof g.checkedAt !== 'string' || !isValidDate(g.checkedAt)) e('guide.checkedAt 날짜 오류');
       if (!Array.isArray(g.corrections)) e('guide.corrections 배열 아님');
-      for (const c of g.corrections ?? []) if (!URL_RE.test(c)) e(`guide.corrections 주소 오류: ${c}`);
+      for (const c of Array.isArray(g.corrections) ? g.corrections : []) if (typeof c !== 'string' || !URL_RE.test(c)) e('guide.corrections 주소 오류');
       if (g.nextYearNotice != null) {
-        if (!URL_RE.test(g.nextYearNotice.url ?? '') || !g.nextYearNotice.summary) e('guide.nextYearNotice는 { url, summary } 형식');
+        if (!isObj(g.nextYearNotice) || typeof g.nextYearNotice.url !== 'string' || !URL_RE.test(g.nextYearNotice.url) || !str(g.nextYearNotice.summary)) e('guide.nextYearNotice는 { url, summary } 형식');
       }
     }
 
@@ -591,7 +592,6 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
     }
     // 이후 검사는 배열이 아닌 값을 빈 배열로 다뤄 예외로 멈추지 않게 한다
     // 객체가 아닌 원소는 원래 번호로 오류를 남기고 이후 검사에서 뺀다(번호는 원래 배열 기준으로 유지)
-    const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
     const arr = (k) => {
       if (!Array.isArray(u[k])) return [];
       u[k].forEach((x, i) => { if (!isObj(x)) e(`${k}[${i}]: 객체가 아님`); });
@@ -831,6 +831,8 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
     if (!isVer(m.schemaVersion) || !isVer(m.minAppVersion)) return bad('버전 정보 없음');
     if (!SCHEMA_VERSIONS.includes(m.schemaVersion) || m.minAppVersion > APP_VERSION) return { ok: false, reason: 'needApp', detail: '새 프로그램 필요' };
     if (!isVer(m.dataVersion)) return bad('자료 버전 없음');
+    const dateOrNull = (v) => v === null || v === undefined || (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v));
+    if (!dateOrNull(m.releasedAt) || !dateOrNull(m.checkedAt) || !dateOrNull(m.builtAt)) return bad('날짜 형식 오류');
     if (!Array.isArray(data.universities) || !data.universities.length) return bad('대학 목록 없음');
     if (data.universities.length > LIMITS.universities) return bad('대학 수가 너무 많음');
     if (m.count !== data.universities.length) return bad('대학 수가 meta.count와 다름');
@@ -924,9 +926,19 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
     const c = checkData(r.data, env.embedded, env.validateAll);
     if (!c.ok) return { status: c.reason, detail: c.detail };
     if (versionOf(r.data) <= versionOf(env.current)) return { status: 'latest', version: versionOf(r.data) };
+    // 이미 받아 둔(아직 적용 전) 자료가 같거나 더 새로우면 덮어쓰지 않는다
+    const pending = storedVersion(env.storage);
+    if (pending.version >= versionOf(r.data)) return { status: 'new', saved: true, version: pending.version, meta: pending.meta };
     let saved = false;
     try { if (env.storage) { env.storage.setItem(STORE_KEY, r.text); saved = true; } } catch (e) { saved = false; }
     return { status: 'new', saved, version: versionOf(r.data), meta: r.data.meta };
+  }
+
+  function storedVersion(storage) {
+    try {
+      const d = JSON.parse(storage.getItem(STORE_KEY));
+      return { version: versionOf(d), meta: d.meta };
+    } catch (e) { return { version: 0, meta: null }; }
   }
 
   // 같은 확인이 겹치지 않게 감싼다(진행 중이면 그 결과를 같이 기다림)
@@ -1475,11 +1487,18 @@ footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px
 
   document.getElementById('checked').textContent = META.checkedAt || '-';
   showStorageWarn();
-  renderDataBar();
+  try { renderDataBar(); } catch (err) { if (BOOT.source === 'stored') { try { store.removeItem(TGU.STORE_KEY); } catch (e) { /* 무시 */ } location.reload(); return; } throw err; }
   let justUpdated = false;
   try { justUpdated = sessionStorage.getItem('tg.justUpdated') === '1'; sessionStorage.removeItem('tg.justUpdated'); } catch (e) { /* 무시 */ }
-  if (justUpdated && BOOT.source === 'stored') renderUpdateBar({ status: 'applied' });
-  render();
+  try {
+    if (justUpdated && BOOT.source === 'stored') renderUpdateBar({ status: 'applied' });
+    render();
+  } catch (err) {
+    if (BOOT.source !== 'stored') throw err;
+    try { store.removeItem(TGU.STORE_KEY); } catch (e) { /* 무시 */ }
+    location.reload();
+    return;
+  }
   if (IS_FILE) autoTimer = setTimeout(() => { checkUpdate(); }, 500);
   // 탭을 열어 둔 채 한국 자정이 지나면 D-day가 바뀌도록 다시 그린다
   let shownDay = today();
